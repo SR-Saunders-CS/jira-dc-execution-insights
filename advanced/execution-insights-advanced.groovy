@@ -316,6 +316,11 @@ try {
     if (rrdBase.exists()) {
         List<File> nodeDirs = (rrdBase.listFiles()
             ?.findAll { it.isDirectory() }?.sort { it.name } ?: []) as List<File>
+        // Flat layout: .rrd4j files directly under scriptrunner/rrd/ (no node
+        // folders). Treat the root itself as a "node" so the data is found.
+        if (rrdBase.listFiles()?.any { it.isFile() && it.name.endsWith('.rrd4j') }) {
+            nodeDirs.add(0, rrdBase)
+        }
 
         if (!MULTI_NODE) nodeDirs = nodeDirs ? [nodeDirs.first()] : []
 
@@ -580,7 +585,7 @@ WorkflowSchemeManager wfSchemeManager =
 Map<String, List<String>> wfToProjects = [:]
 ComponentAccessor.projectManager.getProjects().each { project ->
     wfSchemeManager.getWorkflowMap(project)
-        .values().unique()
+        .values().toUnique()  // toUnique: map may be read-only
         .each { String wfName ->
             if (!wfToProjects.containsKey(wfName)) wfToProjects[wfName] = []
             wfToProjects[wfName] << project.key
