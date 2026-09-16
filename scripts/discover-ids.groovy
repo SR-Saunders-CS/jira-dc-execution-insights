@@ -9,13 +9,12 @@
 // usage-report-multi-node.groovy.
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── ⚙ SET YOUR NODE DIRECTORY NAME ──────────────────────────────────────
-// Not sure what your node name is? Run this in the Script Console:
-//   import com.atlassian.jira.component.ComponentAccessor
-//   import com.atlassian.jira.config.util.JiraHome
-//   def home = ComponentAccessor.getComponent(JiraHome).home
-//   new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
-String NODE_ID = "dc-saunders-0"   // ← your node dir name
+// ── ⚙ NODE_ID — OPTIONAL ───────────────────────────────────────────────
+// Leave blank ("") and the script auto-detects where RRD files live:
+//   • Flat layout  — .rrd4j files directly in $JIRA_HOME/scriptrunner/rrd/
+//   • One node dir — e.g. scriptrunner/rrd/dc-saunders-0/ is used automatically
+// Only set NODE_ID if you have several node directories and want one of them.
+String NODE_ID = ""   // ← optional
 
 // ── Imports ──────────────────────────────────────────────────────────────
 import com.atlassian.jira.component.ComponentAccessor
@@ -101,10 +100,37 @@ try {
 }
 
 // ── RRD file scan ─────────────────────────────────────────────────────────
+// ScriptRunner stores RRD files in one of two layouts:
+//   scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j   ← node folders
+//   scriptrunner/rrd/{scriptId}.rrd4j            ← flat (no node folders)
 JiraHome jiraHome = ComponentAccessor.getComponent(JiraHome)
-File nodeDir = new File(jiraHome.home, "scriptrunner/rrd/${NODE_ID}")
+File rrdRoot = new File(jiraHome.home, "scriptrunner/rrd")
+List<File> rootEntries = (rrdRoot.listFiles() ?: []) as List<File>
+List<File> nodeDirs    = rootEntries.findAll { it.isDirectory() }.sort { it.name }
+boolean    flatLayout  = rootEntries.any { it.isFile() && it.name.endsWith('.rrd4j') }
+
+File   nodeDir
+String layoutLabel
+if (NODE_ID) {
+    nodeDir     = new File(rrdRoot, NODE_ID)
+    layoutLabel = "node folder: ${NODE_ID} (set manually)"
+} else if (flatLayout) {
+    nodeDir     = rrdRoot
+    layoutLabel = "flat — no node folders (auto-detected)"
+} else if (nodeDirs.size() == 1) {
+    nodeDir     = nodeDirs.first()
+    layoutLabel = "node folder: ${nodeDir.name} (auto-detected)"
+} else if (nodeDirs.size() > 1) {
+    nodeDir     = nodeDirs.first()
+    layoutLabel = "node folder: ${nodeDir.name} (first of ${nodeDirs.size()} — " +
+                  "set NODE_ID to choose: ${nodeDirs*.name.join(', ')})"
+} else {
+    nodeDir     = rrdRoot
+    layoutLabel = "no RRD data recorded yet"
+}
+
 List<File> rrdFiles = nodeDir.exists()
-    ? (nodeDir.listFiles()?.findAll { it.name.endsWith('.rrd4j') } ?: [])
+    ? (nodeDir.listFiles()?.findAll { it.isFile() && it.name.endsWith('.rrd4j') } ?: [])
     : []
 Set<String> rrdKeys = rrdFiles.collect { it.name.replace('.rrd4j', '') } as Set<String>
 
@@ -119,7 +145,7 @@ Map<String, List<String>> wfToProjects = [:]
 ComponentAccessor.projectManager.getProjects().each { project ->
     wfSchemeManager.getWorkflowMap(project)
         .values()
-        .unique()
+        .toUnique()   // toUnique: getWorkflowMap() may return a read-only map
         .each { String wfName ->
             if (!wfToProjects.containsKey(wfName)) wfToProjects[wfName] = []
             wfToProjects[wfName] << project.key
@@ -137,14 +163,14 @@ html.html {
     h1("ScriptRunner — RRD ID Discovery")
     p(class: "sub",
       "Generated: ${new Date().format('yyyy-MM-dd HH:mm:ss z')} | " +
-      "Node: ${NODE_ID} | " +
+      "RRD layout: ${layoutLabel} | " +
       "RRD files found: ${rrdFiles.size()}")
 
     if (!nodeDir.exists()) {
         div(class: "warn") {
             mkp.yieldUnescaped(
                 "⚠ Node directory not found: <code>${nodeDir.absolutePath}</code><br>" +
-                "Check the NODE_ID value at the top of this script.")
+                "Check the NODE_ID value at the top of this script, or leave it blank.")
         }
     }
 
@@ -527,7 +553,7 @@ Behaviours are listed here for inventory purposes only.
 
     hr()
     p(class: "sub",
-      "RRD ✓ = an RRD file exists for this script on node ${NODE_ID}. " +
+      "RRD ✓ = an RRD file exists for this script in ${nodeDir.absolutePath}. " +
       "Scripts without RRD ✓ have either never run or have not yet had their " +
       "first execution recorded to disk. " +
       "Projects shows where a script is configured to apply — not which " +
