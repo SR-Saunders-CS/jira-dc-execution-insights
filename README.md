@@ -35,37 +35,46 @@ what a full implementation *could* look like, check out
 
 ## Quick Start
 
-### Step 1 — Find your node name
+### Step 1 — Check your RRD layout (optional)
 
-Every Jira Data Center node writes its RRD files to a separate directory.
-You need to know your node name before running any script.
+ScriptRunner stores RRD files in one of two layouts, depending on your
+instance:
 
-Run this one-liner in the Script Console:
+| Layout | Path | Typical for |
+|---|---|---|
+| **Node folders** | `$JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j` | Clustered Data Center |
+| **Flat** | `$JIRA_HOME/scriptrunner/rrd/{scriptId}.rrd4j` | Non-clustered instances |
+
+**You don't need to configure anything for either layout.** Every script
+auto-detects where your RRD files live and shows the detected layout in its
+report header. `NODE_ID` is optional and can stay blank (`""`).
+
+If you want to check your layout, run this in the Script Console:
 
 ```groovy
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
 def home = ComponentAccessor.getComponent(JiraHome).home
-new File(home, "scriptrunner/rrd").listFiles()?.each { println it.name }
+def entries = new File(home, "scriptrunner/rrd").listFiles() ?: []
+"Node folders: ${entries.findAll { it.isDirectory() }*.name}\n" +
+"RRD files directly in root: ${entries.count { it.isFile() && it.name.endsWith('.rrd4j') }}"
 ```
 
-The output will be one or more directory names, for example:
-
-```
-/var/atlassian/application-data/jira/shared-home/scriptrunner/rrd/dc-saunders-0
-```
-
-Where `dc-saunders-0` is your `NODE_ID`.
+- **Node folders listed, 0 files in root:** node-folder layout. With one
+  folder, the scripts use it automatically. With several, set `NODE_ID` to
+  pick one, or use the multi-node report (Step 4).
+- **No node folders, many files in root:** flat layout. Leave `NODE_ID`
+  blank.
 
 ---
 
 ### Step 2 — Run the discovery script
 
 Run [`scripts/discover-ids.groovy`](scripts/discover-ids.groovy) in the
-Script Console. Set your node name at the top first:
+Script Console. No configuration is needed — `NODE_ID` can stay blank:
 
 ```groovy
-String NODE_ID = "dc-saunders-0"   // ← change this to your node name
+String NODE_ID = ""   // ← optional: only set if you have several node folders
 ```
 
 The discovery script produces an HTML report covering every ScriptRunner
@@ -115,11 +124,11 @@ telling the script where to look.
 
 Copy the **SCRIPT_ID** from the discovery report for the script you want to
 inspect. Open [`scripts/usage-report.groovy`](scripts/usage-report.groovy)
-and set the two values at the top:
+and set `SCRIPT_ID` at the top:
 
 ```groovy
 String SCRIPT_ID = "paste-your-id-here"   // ← from Step 2
-String NODE_ID   = "dc-saunders-0"        // ← your node name
+String NODE_ID   = ""                     // ← optional: leave blank to auto-detect
 ```
 
 Run it in the Script Console. The report automatically identifies the script
@@ -158,7 +167,8 @@ from the ID format — no need to specify the feature type manually.
 If your Jira instance runs on multiple nodes, use
 [`scripts/usage-report-multi-node.groovy`](scripts/usage-report-multi-node.groovy)
 instead. It discovers all node directories automatically, sums counts across
-every node, and shows which nodes had data for that script. Just set
+every node (plus the flat root, if your instance uses the flat layout), and
+shows which nodes had data for that script. Just set
 `SCRIPT_ID` and run — no node name needed, and no feature type to configure.
 
 ```groovy
@@ -199,11 +209,14 @@ scriptrunner-execution-insights/
 
 ## How it works
 
-ScriptRunner writes one `.rrd4j` file per script under:
+ScriptRunner writes one `.rrd4j` file per script under either:
 
 ```
-$JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j
+$JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j   ← node folders
+$JIRA_HOME/scriptrunner/rrd/{scriptId}.rrd4j            ← flat layout
 ```
+
+The scripts detect which layout your instance uses automatically.
 
 Each file contains two archives:
 
