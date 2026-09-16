@@ -1,41 +1,35 @@
 // ═══════════════════════════════════════════════════════════════════════
-// scripts/usage-report.groovy
-// ScriptRunner RRD Usage PoC — Single Node
+// scripts/usage-report-multi-node.groovy
+// ScriptRunner RRD Usage PoC — All Nodes
 // Run from: Script Console  |  Output: HTML
 //
 // PURPOSE: Show that ScriptRunner records execution data for every script
 // it runs, and that data is accessible programmatically. This reads one
-// script's RRD file and renders a simple metrics table — including the
-// script's name, feature type (looked up automatically), and which
-// projects the script is configured to apply to.
+// script's RRD file from EVERY node directory (plus the flat root, if used),
+// sums the counts, and renders a metrics table — including the script's
+// name, feature type (looked up automatically), and which projects the
+// script is configured to apply to.
 //
-// MULTI-NODE CLUSTER? Use usage-report-multi-node.groovy instead.
+// Works on clusters AND single-node / flat layouts — no NODE_ID needed.
 //
 // Run discover-ids.groovy first to find the correct SCRIPT_ID for Script
 // Fields, Post-Functions, and REST Endpoints.
 // See docs/field-guide.md for full details on every feature type.
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── ⚙ CONFIGURE THESE TWO VALUES ────────────────────────────────────────
+// ── ⚙ CONFIGURE THIS VALUE ──────────────────────────────────────────────
 //
 // SCRIPT_ID — the RRD key (filename without .rrd4j).
 //   Run discover-ids.groovy to find the correct ID for Script Fields,
 //   Post-Functions, and REST Endpoints. For Jobs, Escalation Services,
 //   and Listeners use the UUID from the SR admin URL (?id=...).
-//
-// NODE_ID — the node directory name under $JIRA_HOME/scriptrunner/rrd/
-//   Not sure? Run this in the Script Console:
-//   new File(ComponentAccessor.getComponent(JiraHome).home, "scriptrunner/rrd")
-//     .listFiles()?.each { println it.name }
 
-String SCRIPT_ID = "e2c59022-d52f-48ae-bf23-ec04dc5238dc"  // ← find via discover-ids.groovy
-String NODE_ID   = "dc-saunders-0"                          // ← your node dir
+String SCRIPT_ID = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  // ← find via discover-ids.groovy
 
 // ── Imports ──────────────────────────────────────────────────────────────
 
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
-import com.atlassian.jira.workflow.WorkflowManager
 import com.atlassian.jira.workflow.WorkflowManager
 import com.atlassian.jira.workflow.WorkflowSchemeManager
 import com.onresolve.scriptrunner.scheduled.ScheduledScriptJobManager
@@ -58,15 +52,28 @@ long sec90d = 90L * 86_400L
 
 // ── Locate the RRD file ───────────────────────────────────────────────────
 
-JiraHome jiraHome = ComponentAccessor.getComponent(JiraHome)
-File rrdFile = new File(
-    jiraHome.home, "scriptrunner/rrd/${NODE_ID}/${SCRIPT_ID}.rrd4j"
-)
+// ScriptRunner stores RRD files in one of two layouts:
+//   scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j   ← node folders (one per node)
+//   scriptrunner/rrd/{scriptId}.rrd4j            ← flat (no node folders)
+// This script checks every node folder AND the flat root.
 
-if (!rrdFile.exists()) {
-    return "<p style='color:red'>RRD file not found: ${rrdFile.absolutePath}<br>" +
-           "Check the SCRIPT_ID and NODE_ID values at the top of this script.<br>" +
-           "Run discover-ids.groovy to find the correct values.</p>"
+JiraHome jiraHome = ComponentAccessor.getComponent(JiraHome)
+File rrdRoot = new File(jiraHome.home, "scriptrunner/rrd")
+List<File> rootEntries = (rrdRoot.listFiles() ?: []) as List<File>
+List<File> searchDirs  = rootEntries.findAll { it.isDirectory() }.sort { it.name }
+if (rootEntries.any { it.isFile() && it.name.endsWith('.rrd4j') }) searchDirs.add(0, rrdRoot)
+
+Map<String, File> rrdFilesByNode = [:]   // label → file
+searchDirs.each { File dir ->
+    File f = new File(dir, "${SCRIPT_ID}.rrd4j")
+    if (f.exists()) rrdFilesByNode[dir == rrdRoot ? "(flat root)" : dir.name] = f
+}
+
+if (!rrdFilesByNode) {
+    return "<p style='color:red'>No RRD file found for <code>${SCRIPT_ID}</code> " +
+           "in any of: ${searchDirs.collect { it.absolutePath }.join(', ') ?: rrdRoot.absolutePath}<br>" +
+           "Check the SCRIPT_ID value at the top of this script.<br>" +
+           "Run discover-ids.groovy to find the correct value.</p>"
 }
 
 // ── Auto-identify the script — name and feature type ─────────────────────
@@ -182,40 +189,43 @@ if (isRestPattern) {
     scriptExtra  = "JQL usage: issueFunction in ${SCRIPT_ID}(...)"
 }
 
-// ── Read the RRD file ─────────────────────────────────────────────────────
+// ── Read and sum the RRD files across all nodes ──────────────────────────
 // ConsolFun.AVERAGE reads the daily consolidated archive — the same data
 // source the SR admin UI Performance tab graphs use.
-
-RrdDb db = RrdDb.getBuilder()
-    .setPath(rrdFile.absolutePath)
-    .readOnly()
-    .build()
-
-def fd = db.createFetchRequest(ConsolFun.AVERAGE, nowSec - sec90d, nowSec)
-    .fetchData()
-db.close()
-
-// ── Aggregate the fetched rows ────────────────────────────────────────────
-
-long[]   timestamps = fd.timestamps
-double[] counts     = fd.getValues('count')
-double[] durations  = fd.getValues('duration')
 
 double sum30 = 0, sum60 = 0, sum90 = 0
 double durSum = 0
 int    durCnt = 0
 long   lastTs = 0L
 
-(0..<fd.rowCount).each { int i ->
-    double c = counts[i]
-    double d = durations[i]
-    if (!Double.isNaN(c)) {
-        sum90 += c
-        if (timestamps[i] >= nowSec - sec60d) sum60 += c
-        if (timestamps[i] >= nowSec - sec30d) sum30 += c
-        if (c > 0 && timestamps[i] > lastTs)  lastTs = timestamps[i]
+rrdFilesByNode.each { String nodeLabel, File rrdFile ->
+    RrdDb db = RrdDb.getBuilder()
+        .setPath(rrdFile.absolutePath)
+        .readOnly()
+        .build()
+    def fd
+    try {
+        fd = db.createFetchRequest(ConsolFun.AVERAGE, nowSec - sec90d, nowSec)
+            .fetchData()
+    } finally {
+        db.close()
     }
-    if (!Double.isNaN(d)) { durSum += d; durCnt++ }
+
+    long[]   timestamps = fd.timestamps
+    double[] counts     = fd.getValues('count')
+    double[] durations  = fd.getValues('duration')
+
+    (0..<fd.rowCount).each { int i ->
+        double c = counts[i]
+        double d = durations[i]
+        if (!Double.isNaN(c)) {
+            sum90 += c
+            if (timestamps[i] >= nowSec - sec60d) sum60 += c
+            if (timestamps[i] >= nowSec - sec30d) sum30 += c
+            if (c > 0 && timestamps[i] > lastTs)  lastTs = timestamps[i]
+        }
+        if (!Double.isNaN(d)) { durSum += d; durCnt++ }
+    }
 }
 
 String fmt30  = "~${(long)(sum30 + 0.5)}"
@@ -244,7 +254,7 @@ switch (detectedType) {
         Map<String, List<String>> wfToProjects = [:]
         ComponentAccessor.projectManager.getProjects().each { project ->
             wfSchemeManager.getWorkflowMap(project)
-                .values().unique()
+                .values().toUnique()  // toUnique: map may be read-only
                 .each { String wfName ->
                     if (!wfToProjects.containsKey(wfName)) wfToProjects[wfName] = []
                     wfToProjects[wfName] << project.key
@@ -340,10 +350,10 @@ return """
 </style></head>
 <body>
 
-  <h2>ScriptRunner — RRD Usage Report</h2>
+  <h2>ScriptRunner — RRD Usage Report (all nodes)</h2>
   <p class="sub">
     Generated: ${new Date().format('yyyy-MM-dd HH:mm:ss z')} &nbsp;|&nbsp;
-    Node: <code>${NODE_ID}</code> &nbsp;|&nbsp;
+    Nodes with data: <code>${rrdFilesByNode.keySet().join(', ')}</code> &nbsp;|&nbsp;
     Detected type: <code>${detectedType}</code>
   </p>
 
@@ -362,8 +372,8 @@ return """
       <td><code>${SCRIPT_ID}</code></td>
     </tr>
     <tr>
-      <td>RRD file</td>
-      <td><code>${rrdFile.absolutePath}</code></td>
+      <td>RRD files</td>
+      <td>${rrdFilesByNode.values().collect { "<code>${it.absolutePath}</code>" }.join('<br>')}</td>
     </tr>
   </table>
 
