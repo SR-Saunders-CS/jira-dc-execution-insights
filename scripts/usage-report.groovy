@@ -23,19 +23,20 @@
 //   Post-Functions, and REST Endpoints. For Jobs, Escalation Services,
 //   and Listeners use the UUID from the SR admin URL (?id=...).
 //
-// NODE_ID — the node directory name under $JIRA_HOME/scriptrunner/rrd/
-//   Not sure? Run this in the Script Console:
-//   new File(ComponentAccessor.getComponent(JiraHome).home, "scriptrunner/rrd")
-//     .listFiles()?.each { println it.name }
+// NODE_ID — OPTIONAL. Leave blank ("") and the script auto-detects:
+//   • Flat layout  — .rrd4j files directly in $JIRA_HOME/scriptrunner/rrd/
+//                    (typical of non-clustered instances)
+//   • One node dir — e.g. scriptrunner/rrd/dc-saunders-0/ is used automatically
+//   Only set NODE_ID if you have several node directories and want one of them.
+//   (For clusters, usage-report-multi-node.groovy sums all nodes for you.)
 
-String SCRIPT_ID = "xxxxxxxx-xxxx-xxxx-xxx-xxxxxxxx"  // ← find via discover-ids.groovy
-String NODE_ID   = "dc-saunders-0"                          // ← your node dir
+String SCRIPT_ID = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  // ← find via discover-ids.groovy
+String NODE_ID   = ""                                      // ← optional — see above
 
 // ── Imports ──────────────────────────────────────────────────────────────
 
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
-import com.atlassian.jira.workflow.WorkflowManager
 import com.atlassian.jira.workflow.WorkflowManager
 import com.atlassian.jira.workflow.WorkflowSchemeManager
 import com.onresolve.scriptrunner.scheduled.ScheduledScriptJobManager
@@ -58,15 +59,44 @@ long sec90d = 90L * 86_400L
 
 // ── Locate the RRD file ───────────────────────────────────────────────────
 
+// ScriptRunner stores RRD files in one of two layouts:
+//   scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j   ← node folders
+//   scriptrunner/rrd/{scriptId}.rrd4j            ← flat (no node folders)
+
 JiraHome jiraHome = ComponentAccessor.getComponent(JiraHome)
-File rrdFile = new File(
-    jiraHome.home, "scriptrunner/rrd/${NODE_ID}/${SCRIPT_ID}.rrd4j"
-)
+File rrdRoot = new File(jiraHome.home, "scriptrunner/rrd")
+List<File> rootEntries = (rrdRoot.listFiles() ?: []) as List<File>
+List<File> nodeDirs    = rootEntries.findAll { it.isDirectory() }.sort { it.name }
+boolean    flatLayout  = rootEntries.any { it.isFile() && it.name.endsWith('.rrd4j') }
+
+File   rrdDir
+String layoutLabel
+if (NODE_ID) {
+    rrdDir      = new File(rrdRoot, NODE_ID)
+    layoutLabel = "node folder: ${NODE_ID} (set manually)"
+} else if (flatLayout) {
+    rrdDir      = rrdRoot
+    layoutLabel = "flat — no node folders (auto-detected)"
+} else if (nodeDirs.size() == 1) {
+    rrdDir      = nodeDirs.first()
+    layoutLabel = "node folder: ${rrdDir.name} (auto-detected)"
+} else if (nodeDirs.size() > 1) {
+    return "<p style='color:red'>Multiple node folders found under ${rrdRoot.absolutePath}: " +
+           "<code>${nodeDirs*.name.join(', ')}</code><br>" +
+           "Set NODE_ID to one of them, or use usage-report-multi-node.groovy " +
+           "to sum all nodes.</p>"
+} else {
+    return "<p style='color:red'>No RRD data found under ${rrdRoot.absolutePath}<br>" +
+           "ScriptRunner has not recorded any executions on this instance yet.</p>"
+}
+
+File rrdFile = new File(rrdDir, "${SCRIPT_ID}.rrd4j")
 
 if (!rrdFile.exists()) {
     return "<p style='color:red'>RRD file not found: ${rrdFile.absolutePath}<br>" +
-           "Check the SCRIPT_ID and NODE_ID values at the top of this script.<br>" +
-           "Run discover-ids.groovy to find the correct values.</p>"
+           "Layout: ${layoutLabel}<br>" +
+           "Check the SCRIPT_ID value at the top of this script.<br>" +
+           "Run discover-ids.groovy to find the correct value.</p>"
 }
 
 // ── Auto-identify the script — name and feature type ─────────────────────
@@ -244,7 +274,7 @@ switch (detectedType) {
         Map<String, List<String>> wfToProjects = [:]
         ComponentAccessor.projectManager.getProjects().each { project ->
             wfSchemeManager.getWorkflowMap(project)
-                .values().unique()
+                .values().toUnique()  // toUnique: map may be read-only
                 .each { String wfName ->
                     if (!wfToProjects.containsKey(wfName)) wfToProjects[wfName] = []
                     wfToProjects[wfName] << project.key
@@ -343,7 +373,7 @@ return """
   <h2>ScriptRunner — RRD Usage Report</h2>
   <p class="sub">
     Generated: ${new Date().format('yyyy-MM-dd HH:mm:ss z')} &nbsp;|&nbsp;
-    Node: <code>${NODE_ID}</code> &nbsp;|&nbsp;
+    RRD layout: <code>${layoutLabel}</code> &nbsp;|&nbsp;
     Detected type: <code>${detectedType}</code>
   </p>
 
