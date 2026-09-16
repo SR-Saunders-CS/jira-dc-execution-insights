@@ -17,11 +17,14 @@ ScriptRunner records execution data for every script it runs into **RRD
 (Round Robin Database)** files on disk. These are the same files that power
 the **Performance tab** graphs in the SR admin UI.
 
-Each script gets its own file:
+Each script gets its own file, in one of two layouts:
 
 ```
-$JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j
+$JIRA_HOME/scriptrunner/rrd/{nodeId}/{scriptId}.rrd4j   ← node folders (clustered DC)
+$JIRA_HOME/scriptrunner/rrd/{scriptId}.rrd4j            ← flat (non-clustered)
 ```
+
+The PoC scripts auto-detect which layout is in use.
 
 The file contains two archives:
 - **5-minute archive** — what the SR Performance tab reads in real time
@@ -36,16 +39,16 @@ real-time data, use the SR admin Performance tab directly.
 
 ---
 
-## Step 1 — Find your node ID
+## Step 1 — Check your RRD layout
 
-The node ID is the name of the directory directly under
-`$JIRA_HOME/scriptrunner/rrd/`.
+Look at what sits directly under `$JIRA_HOME/scriptrunner/rrd/`.
 
 **Option A — Check the filesystem (if you have server access):**
 ```
 ls $JIRA_HOME/scriptrunner/rrd/
 ```
-You will see one directory per node, e.g. `dc-saunders-0` or `jira-node-1`.
+- **Directories** such as `dc-saunders-0` or `jira-node-1` mean the node-folder layout.
+- **`.rrd4j` files** mean the flat layout. There is no node ID.
 
 **Option B — Read it from Groovy (Script Console):**
 ```groovy
@@ -53,19 +56,16 @@ import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.config.util.JiraHome
 
 def home = ComponentAccessor.getComponent(JiraHome).home
-def rrdBase = new File(home, "scriptrunner/rrd")
-rrdBase.listFiles()?.findAll { it.isDirectory() }?.each {
-    println it.name
-}
+def entries = new File(home, "scriptrunner/rrd").listFiles() ?: []
+"Node folders: ${entries.findAll { it.isDirectory() }*.name}\n" +
+"RRD files directly in root: ${entries.count { it.isFile() && it.name.endsWith('.rrd4j') }}"
 ```
-Run this in the Script Console and it prints every node directory name.
 
-**Single-node vs. multi-node:**
-- Single-node: one directory, use that name directly.
-- Multi-node (Data Center cluster): one directory per node. Use
-  `usage-report-multi-node.groovy` — it discovers all node directories
-  automatically and sums counts across every node with no hardcoded node
-  name needed.
+**What to do with the result:**
+- **Flat layout:** leave `NODE_ID` blank (`""`). The scripts read the root folder.
+- **One node folder:** leave `NODE_ID` blank. The scripts pick that folder automatically.
+- **Several node folders (cluster):** use `usage-report-multi-node.groovy`,
+  which sums counts across every node, or set `NODE_ID` to inspect one node.
 
 ---
 
@@ -261,13 +261,18 @@ import com.atlassian.jira.config.util.JiraHome
 def home = ComponentAccessor.getComponent(JiraHome).home
 def rrdBase = new File(home, "scriptrunner/rrd")
 
-rrdBase.listFiles()?.findAll { it.isDirectory() }?.sort { it.name }?.each { nodeDir ->
-    println "=== Node: ${nodeDir.name} ==="
-    nodeDir.listFiles()
-        ?.findAll { it.name.endsWith('.rrd4j') }
+List<File> dirs = (rrdBase.listFiles()?.findAll { it.isDirectory() }?.sort { it.name } ?: []) as List<File>
+if (rrdBase.listFiles()?.any { it.isFile() && it.name.endsWith('.rrd4j') }) dirs.add(0, rrdBase)
+
+StringBuilder out = new StringBuilder()
+dirs.each { File dir ->
+    out << "=== ${dir == rrdBase ? 'Flat root (no node folder)' : 'Node: ' + dir.name} ===\n"
+    dir.listFiles()
+        ?.findAll { it.isFile() && it.name.endsWith('.rrd4j') }
         ?.sort { it.name }
-        ?.each { println "  ${it.name.replace('.rrd4j', '')}" }
+        ?.each { out << "  ${it.name.replace('.rrd4j', '')}\n" }
 }
+out.toString()
 ```
 
 This gives you a complete inventory of every script SR has ever tracked on
